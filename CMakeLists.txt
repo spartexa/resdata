@@ -42,68 +42,77 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
       "RelWithDebInfo")
 endif()
 
+
+# DEBUG: Print all targets (remove when done)
+get_property(_targets DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY BUILDSYSTEM_TARGETS)
+message(STATUS "=== ALL CMAKE TARGETS ===")
+foreach(t ${_targets})
+    message(STATUS "  → ${t}")
+endforeach()
+message(STATUS "=========================")
+
 # -----------------------------------------------------------------
 # Conan: C++ package manager
 # https://docs.conan.io/en/latest/howtos/cmake_launch.html
 # -----------------------------------------------------------------
 
 if(USE_CONAN)
-  if(NOT EXISTS "${CMAKE_BINARY_DIR}/conan.cmake")
-    message(
-      STATUS
-        "Downloading conan.cmake from https://github.com/conan-io/cmake-conan")
-    file(
-      DOWNLOAD
-      "https://raw.githubusercontent.com/conan-io/cmake-conan/0.18.1/conan.cmake"
-      "${CMAKE_BINARY_DIR}/conan.cmake")
 
-    # Patch the downloaded conan.cmake to support MSVC 1944 (VS 2022)
-    message(STATUS "Patching conan.cmake for MSVC 1944 support")
-    file(READ "${CMAKE_BINARY_DIR}/conan.cmake" CONAN_CMAKE_CONTENT)
+    if(NOT EXISTS "${CMAKE_BINARY_DIR}/conan_toolchain.cmake")
+        message(STATUS "Running conan install (two-step to avoid layout bug)...")
+    
+        # Step 1: Install packages ONLY (no generators = no layout trigger)
+        execute_process(
+            COMMAND conan install "${CMAKE_SOURCE_DIR}"
+                    --output-folder "${CMAKE_BINARY_DIR}"
+                    --build=missing
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            RESULT_VARIABLE result1
+        )
+        if(NOT result1 EQUAL 0)
+            message(FATAL_ERROR "Conan install step 1 failed")
+        endif()
+    
+        # Step 2: Generate ONLY (now packages exist, no full install)
+        execute_process(
+            COMMAND conan install "${CMAKE_SOURCE_DIR}"
+                    --output-folder "${CMAKE_BINARY_DIR}"
+                    -g CMakeToolchain
+                    -g CMakeDeps
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            RESULT_VARIABLE result2
+        )
+        if(NOT result2 EQUAL 0)
+            message(FATAL_ERROR "Conan generate step 2 failed")
+        endif()
+    endif()
 
-    string(
-      REPLACE
-        "elseif(NOT MSVC_VERSION VERSION_LESS 1930 AND MSVC_VERSION VERSION_LESS 1940)"
-        "elseif(NOT MSVC_VERSION VERSION_LESS 1930 AND MSVC_VERSION VERSION_LESS 1950)"
-        CONAN_CMAKE_CONTENT
-        "${CONAN_CMAKE_CONTENT}")
+    # Include the generated toolchain (MANDATORY for find_package to work)
+    include("${CMAKE_BINARY_DIR}/conan_toolchain.cmake")
 
-    file(WRITE "${CMAKE_BINARY_DIR}/conan.cmake" "${CONAN_CMAKE_CONTENT}")
-    message(STATUS "conan.cmake patched successfully for MSVC 1944 support")
-  endif()
+    if(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
+      # set(conan_opts ...)
+    elseif(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+      set(conan_opts backward-cpp:stack_details=backtrace_symbol)
+    elseif(${CMAKE_SYSTEM_NAME} MATCHES "Windows")
+      # set(conan_opts ...)
+    else()
+      message(
+        WARNING
+          "Unknown platform. Conan packages may not be configures correctly.")
+    endif()
 
-  include(${CMAKE_BINARY_DIR}/conan.cmake)
 
-  if(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
-    # set(conan_opts ...)
-  elseif(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
-    set(conan_opts backward-cpp:stack_details=backtrace_symbol)
-  elseif(${CMAKE_SYSTEM_NAME} MATCHES "Windows")
-    # set(conan_opts ...)
-  else()
-    message(
-      WARNING
-        "Unknown platform. Conan packages may not be configures correctly.")
-  endif()
+   # -----------------------------------------------------------------
+   
+    find_path(BACKWARD_INCLUDE_DIR
+          NAMES backward.hpp
+          PATH_SUFFIXES include REQUIRED
+      )
+    message(STATUS "Found backward.hpp at: ${BACKWARD_INCLUDE_DIR}")
 
-  conan_cmake_run(
-    # Packages
-    REQUIRES
-    backward-cpp/1.6
-    catch2/2.13.9
-    fmt/8.0.1
-    # Options
-    OPTIONS
-    catch2:with_main=True
-    ${conan_opts}
-    # Force cppstd to be the same as this CMakeLists.txt's
-    SETTINGS
-    compiler.cppstd=${CMAKE_CXX_STANDARD}
-    # Build from source if there are no pre-compiled binaries
-    BUILD
-    missing
-    GENERATORS
-    cmake_find_package)
+  include_directories(${BACKWARD_INCLUDE_DIR})
+
 endif(USE_CONAN)
 
 # -----------------------------------------------------------------
@@ -253,6 +262,12 @@ endif()
 
 if(MSVC)
   add_definitions("/W3 /D_CRT_SECURE_NO_WARNINGS /wd4996")
+  # Generate debug information (PDB files) for Release builds
+  set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /Zi")
+  set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /Zi")
+  # Enable debug information and optimizations for Release builds
+  set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /DEBUG /OPT:REF /OPT:ICF")
+  set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG /OPT:REF /OPT:ICF")
 endif()
 
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake/Modules

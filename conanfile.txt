@@ -1,0 +1,7 @@
+[requires]
+backward-cpp/1.6
+catch2/3.11.0
+fmt/12.1.0
+
+[options]
+catch2/*:with_main=True

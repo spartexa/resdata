@@ -29,3 +29,12 @@ scratch.sparsebundle
 /dist-*
 
 CMakeSettings.json
+
+output/
+.vs/
+bin/
+obj/
+artifacts/
+Generated/
+
+*.log

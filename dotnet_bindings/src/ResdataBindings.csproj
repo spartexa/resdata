@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <XRID Condition="'$(XRID)' == ''">win-x64</XRID>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Include all native binaries including DLLs, PDB files, and other artifacts -->
+    <None Include="..\..\output\lib\Release\**\*.*" Pack="true" PackagePath="runtimes/$(XRID)/native" />
+  </ItemGroup>
+
+</Project>

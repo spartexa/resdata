@@ -1,5 +1,9 @@
 name: Windows Compile
 
+env:
+  CONFIG: "Release"
+  XRID: "win-x64"
+
 on:
  push:
    branches:
@@ -7,6 +11,16 @@ on:
      - 'version-**'
    tags: "*"
  pull_request:
+   branches:
+     - main
+     - 'version-**'
+ workflow_dispatch:
+   inputs:
+     publish_nuget:
+       description: 'Publish NuGet package for manual runs (true/false)'
+       required: false
+       default: false
+       type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -37,11 +51,95 @@ jobs:
     - name: Install dependencies
       run: |
         python.exe -m pip install --upgrade pip
-        python.exe -m pip install "conan<2"
+        python.exe -m pip install --upgrade conan
 
-    - name: Build ResData
+    - name: Install GitVersion (setup action)
+      uses: gittools/actions/gitversion/setup@v4.2.0
+      with:
+        versionSpec: '6.4.x'
+
+    - name: Determine version (execute action)
+      id: gitversion
+      uses: gittools/actions/gitversion/execute@v4.2.0
+      with:
+        configFilePath: 'GitVersion.yml'
+
+    - name: Build
       run: |
-        python.exe -m pip install -r requirements.txt
-        mkdir cmake-build
-        cmake -S . -B cmake-build -G "Visual Studio 17 2022"
-        cmake --build cmake-build
+        ./build.ps1
+
+    - name: Setup .NET 9 SDK
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: '9.0.x'
+
+    - name: Generate C# bindings
+      run: |
+        python tools/generate_dotnet_bindings.py
+
+    - name: Restore & Build generated bindings
+      run: |
+        dotnet restore dotnet_bindings/src/ResdataBindings.csproj
+        dotnet build dotnet_bindings/src/ResdataBindings.csproj -c Release
+
+    - name: Write version info into dotnet project (for packaging)
+      shell: pwsh
+      env:
+        VERSION: ${{ steps.gitversion.outputs.fullSemVer }}
+        FULL: ${{ steps.gitversion.outputs.fullSemVer }}
+        COMMIT: ${{ steps.gitversion.outputs.sha }}
+        BRANCH: ${{ steps.gitversion.outputs.branchName }}
+      run: |
+        $out = 'dotnet_bindings/src/VersionInfo.json'
+        $obj = @{
+          version = $env:VERSION
+          fullSemVer = $env:FULL
+          commit = $env:COMMIT
+          branch = $env:BRANCH
+          generatedUtc = (Get-Date).ToString('o')
+        }
+        $json = $obj | ConvertTo-Json -Depth 5
+        $dir = Split-Path $out -Parent
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $json | Out-File -FilePath $out -Encoding utf8
+        Write-Host "Wrote version info to $out"
+
+    - name: Pack generated bindings (NuGet)
+      run: |
+        dotnet pack dotnet_bindings/src/ResdataBindings.csproj -c Release -o dotnet_bindings/artifacts /p:XRID=${{ env.XRID }} /p:PackageVersion=${{ steps.gitversion.outputs.fullSemVer }} /p:RepositoryCommit=${{ steps.gitversion.outputs.sha }} /p:RepositoryUrl=https://github.com/${{ github.repository }}
+
+    - name: Ensure GitHub Packages PAT is set (tags or manual publish)
+      if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_nuget == 'true') }}
+      shell: pwsh
+      env:
+        NUGET_PAT: ${{ secrets.NUGET_PAT }}
+      run: |
+        if (-not $env:NUGET_PAT) {
+          Write-Error "Secret NUGET_PAT is required to publish the NuGet package to this repository's feed; aborting"
+          exit 1
+        }
+
+    - name: Publish NuGet package to GitHub Packages (tags or manual publish)
+      if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_nuget == 'true') }}
+      shell: pwsh
+      env:
+        NUGET_PAT: ${{ secrets.NUGET_PAT }}
+        GITHUB_OWNER: ${{ github.repository_owner }}
+      run: |
+        Write-Host "Publishing NuGet package(s) to GitHub Packages for owner: $env:GITHUB_OWNER"
+        # ensure a source exists (ignore if already present)
+        dotnet nuget add source "https://nuget.pkg.github.com/$env:GITHUB_OWNER/index.json" --name "github" --username $env:GITHUB_OWNER --password $env:NUGET_PAT --store-password-in-clear-text || Write-Host "nuget source add may have failed (already present)"
+        $pkgs = Get-ChildItem -Path dotnet_bindings/artifacts -Filter '*.nupkg'
+        if ($pkgs.Count -eq 0) { Write-Error "No nupkg found to publish"; exit 1 }
+        foreach ($p in $pkgs) {
+          Write-Host "Pushing $($p.FullName)"
+          dotnet nuget push $p.FullName --source "https://nuget.pkg.github.com/$env:GITHUB_OWNER/index.json" --api-key $env:NUGET_PAT
+        }
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: Binaries
+        path: output\lib\${{env.CONFIG}}\*
+        if-no-files-found: error
+        retention-days: 30
